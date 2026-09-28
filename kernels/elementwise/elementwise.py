@@ -24,6 +24,48 @@ lib = load(
     extra_cflags=["-std=c++17"],
 )
 
+def check_correctness():
+    torch.manual_seed(0)
+    kernels = [
+        ("f32", lib.elementwise_add_f32, torch.float32, 1e-5, 1e-6, 1),
+        ("f32x4", lib.elementwise_add_f32x4, torch.float32, 1e-5, 1e-6, 4),
+        ("f16", lib.elementwise_add_f16, torch.float16, 1e-3, 1e-3, 1),
+        ("f16x2", lib.elementwise_add_f16x2, torch.float16, 1e-3, 1e-3, 2),
+        ("f16x8", lib.elementwise_add_f16x8, torch.float16, 1e-3, 1e-3, 8),
+        (
+            "f16x8_pack",
+            lib.elementwise_add_f16x8_pack,
+            torch.float16,
+            1e-3,
+            1e-3,
+            8,
+        ),
+    ]
+
+    for name, fn, dtype, rtol, atol, n_elements in kernels:
+        shapes = [
+            (1,),
+            (31,),
+            (257,),
+            (1031,),
+            (2, 1),
+            (2, 1024 * n_elements),
+            (2, 1024 * n_elements + 1),
+        ]
+        for shape in shapes:
+            a = torch.randn(shape, device="cuda", dtype=dtype).contiguous()
+            b = torch.randn(shape, device="cuda", dtype=dtype).contiguous()
+            ref = a + b
+            # NaN makes an unwritten output element fail assert_close.
+            out = torch.full_like(a, float("nan"))
+
+            fn(a, b, out)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)
+            print(f"{name:12s} shape={shape}: PASS")
+
+
+check_correctness()
 
 def run_benchmark(
     perf_func: callable,

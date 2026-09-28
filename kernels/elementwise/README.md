@@ -15,6 +15,9 @@
 
 ## 测试
 
+运行脚本时会先对 6 个 CUDA kernel 做正确性检查，再执行 benchmark。正确性检查覆盖
+一维尾部、二维输入、向量化边界和超过单个 block 线程上限的情况。
+
 ```bash
 # 只测试Ada架构 不指定默认编译所有架构 耗时较长: Volta, Ampere, Ada, Hopper, ...
 export TORCH_CUDA_ARCH_LIST=Ada

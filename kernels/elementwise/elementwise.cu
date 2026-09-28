@@ -4,8 +4,10 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <float.h>
+#include <limits>
 #include <stdio.h>
 #include <stdlib.h>
+#include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 #include <torch/types.h>
 #include <vector>
@@ -144,12 +146,22 @@ __global__ void elementwise_add_f16x8_pack_kernel(half *a, half *b, half *c,
     CHECK_TORCH_TENSOR_DTYPE(a, (th_type))                                     \
     CHECK_TORCH_TENSOR_DTYPE(b, (th_type))                                     \
     CHECK_TORCH_TENSOR_DTYPE(c, (th_type))                                     \
+    TORCH_CHECK(a.is_cuda() && b.is_cuda() && c.is_cuda(),                     \
+                "a, b, and c must be CUDA tensors");                          \
+    TORCH_CHECK(a.device() == b.device() && a.device() == c.device(),         \
+                "a, b, and c must be on the same CUDA device");               \
+    TORCH_CHECK(a.is_contiguous() && b.is_contiguous() && c.is_contiguous(),   \
+                "a, b, and c must be contiguous");                           \
+    TORCH_CHECK(a.sizes() == b.sizes() && a.sizes() == c.sizes(),              \
+                "a, b, and c must have the same shape");                      \
+    TORCH_CHECK(a.numel() <= std::numeric_limits<int>::max(),                  \
+                "tensor is too large for the int32 kernel interface");        \
+    if (a.numel() == 0) {                                                       \
+      return;                                                                  \
+    }                                                                           \
+    const int N = static_cast<int>(a.numel());                                 \
     const int ndim = a.dim();                                                  \
     if (ndim != 2) {                                                           \
-      int N = 1;                                                               \
-      for (int i = 0; i < ndim; ++i) {                                         \
-        N *= a.size(i);                                                        \
-      }                                                                        \
       dim3 block(256 / (n_elements));                                          \
       dim3 grid((N + 256 - 1) / 256);                                          \
       elementwise_add_##packed_type##_kernel<<<grid, block>>>(                 \
@@ -159,8 +171,10 @@ __global__ void elementwise_add_f16x8_pack_kernel(half *a, half *b, half *c,
     } else {                                                                   \
       const int S = a.size(0);                                                 \
       const int K = a.size(1);                                                 \
-      const int N = S * K;                                                     \
-      if ((K / (n_elements)) <= 1024) {                                        \
+      /* Row-wise launches require complete packed elements in each row.        \
+         Otherwise use the flat launch so the kernel can handle the tail. */   \
+      if (K >= (n_elements) && (K % (n_elements)) == 0 &&                     \
+          (K / (n_elements)) <= 1024) {                                       \
         dim3 block(K / (n_elements));                                          \
         dim3 grid(S);                                                          \
         elementwise_add_##packed_type##_kernel<<<grid, block>>>(               \
@@ -168,10 +182,6 @@ __global__ void elementwise_add_f16x8_pack_kernel(half *a, half *b, half *c,
             reinterpret_cast<element_type *>(b.data_ptr()),                    \
             reinterpret_cast<element_type *>(c.data_ptr()), N);                \
       } else {                                                                 \
-        int N = 1;                                                             \
-        for (int i = 0; i < ndim; ++i) {                                       \
-          N *= a.size(i);                                                      \
-        }                                                                      \
         dim3 block(256 / (n_elements));                                        \
         dim3 grid((N + 256 - 1) / 256);                                        \
         elementwise_add_##packed_type##_kernel<<<grid, block>>>(               \
@@ -180,6 +190,7 @@ __global__ void elementwise_add_f16x8_pack_kernel(half *a, half *b, half *c,
             reinterpret_cast<element_type *>(c.data_ptr()), N);                \
       }                                                                        \
     }                                                                          \
+    C10_CUDA_KERNEL_LAUNCH_CHECK();                                            \
   }
 
 TORCH_BINDING_ELEM_ADD(f32, torch::kFloat32, float, 1)
